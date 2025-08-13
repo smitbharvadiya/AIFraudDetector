@@ -1,0 +1,42 @@
+# Node.js / Electron
+electron/node_modules/
+electron/package-lock.json
+electron/dist/
+electron/out/
+
+# React build
+electron/react-app/node_modules/
+electron/react-app/build/
+electron/react-app/.env.local
+electron/react-app/.env.development.local
+electron/react-app/.env.test.local
+electron/react-app/.env.production.local
+
+# Python / FastAPI
+backend/__pycache__/
+backend/*.pyc
+backend/env/
+backend/venv/
+backend/.venv/
+backend/.mypy_cache/
+backend/.pytest_cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# VSCode settings
+.vscode/
