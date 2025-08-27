@@ -1,117 +1,144 @@
-import React, { useEffect, useRef, useState } from "react";
+// App.js
+import React, { useState, useRef, useEffect } from 'react';
 
-const MicStreamer = () => {
-    const wsRef = useRef(null);
-    const [recording, setRecording] = useState(false);
-    const audioChunks = useRef([]);
+function MicStream() {
+  const [isRecording, setIsRecording] = useState(false);
+  const [transcript, setTranscript] = useState('');
+  const [status, setStatus] = useState('Ready to start');
+  const ws = useRef(null);
+  const mediaRecorder = useRef(null);
 
-    useEffect(() => {
-        return () => {
-            if (wsRef.current) wsRef.current.close();
-        };
-    }, []);
-
-    const startStopStreaming = async () => {
-        if (!recording) {
-            wsRef.current = new WebSocket("ws://localhost:8000/audio");
-            wsRef.current.onopen = () => console.log("WebSocket Connected");
-            wsRef.current.onmessage = (event) => console.log("Server:", event.data);
-
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            const audioContext = new AudioContext();
-            const source = audioContext.createMediaStreamSource(stream);
-
-            await audioContext.audioWorklet.addModule("/processor.js");
-            const processorNode = new AudioWorkletNode(audioContext, "audio-processor");
-
-            source.connect(processorNode);
-            processorNode.connect(audioContext.destination);
-
-            processorNode.port.onmessage = (event) => {
-                const floatData = event.data;
-                const int16Buffer = floatTo16Bit(floatData);
-                audioChunks.current.push(int16Buffer);
-
-                if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                    wsRef.current.send(int16Buffer);
-                }
-            };
-
-            setRecording(true);
-        } else {
-            if (wsRef.current) wsRef.current.close();
-            setRecording(false);
-
-            const wavBlob = encodeWAV(audioChunks.current);
-            const url = URL.createObjectURL(wavBlob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = "recorded_audio.wav";
-            a.click();
-
-            URL.revokeObjectURL(url);
-
-            audioChunks.current = [];
-        }
+  useEffect(() => {
+    return () => {
+      if (ws.current) {
+        ws.current.close();
+      }
     };
+  }, []);
 
-    const floatTo16Bit = (float32Array) => {
-        const buffer = new ArrayBuffer(float32Array.length * 2);
-        const view = new DataView(buffer);
-        let offset = 0;
-        for (let i = 0; i < float32Array.length; i++, offset += 2) {
-            let s = Math.max(-1, Math.min(1, float32Array[i]));
-            view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-        }
-        return buffer;
-    };
+  const startRecording = async () => {
+    try {
+      setStatus('Requesting microphone access...');
+      
+      // Get microphone stream
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          sampleRate: 16000,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true
+        } 
+      });
 
-    const encodeWAV = (chunks) => {
-        const totalLength = chunks.reduce((sum, c) => sum + c.byteLength, 0);
-        const buffer = new ArrayBuffer(44 + totalLength);
-        const view = new DataView(buffer);
-
-        const writeString = (offset, str) => {
-            for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
-        };
-
-        writeString(0, "RIFF");
-        view.setUint32(4, 36 + totalLength, true);
-        writeString(8, "WAVE");
-        writeString(12, "fmt ");
-        view.setUint32(16, 16, true);
-        view.setUint16(20, 1, true);
-        view.setUint16(22, 1, true);
-        view.setUint32(24, 44100, true);
-        view.setUint32(28, 44100 * 2, true);
-        view.setUint16(32, 2, true);
-        view.setUint16(34, 16, true);
-        writeString(36, "data");
-        view.setUint32(40, totalLength, true);
-
-        let offset = 44;
-        chunks.forEach((chunk) => {
-            const chunkView = new DataView(chunk);
-            for (let i = 0; i < chunk.byteLength; i++, offset++) {
-                view.setUint8(offset, chunkView.getUint8(i));
-            }
+      setStatus('Connecting to server...');
+      
+      // Connect to WebSocket
+      ws.current = new WebSocket('ws://localhost:8000/ws/transcribe');
+      
+      ws.current.onopen = () => {
+        setStatus('Recording...');
+        setIsRecording(true);
+        setTranscript('');
+        
+        // Setup media recorder
+        mediaRecorder.current = new MediaRecorder(stream, {
+          mimeType: 'audio/webm;codecs=opus'
         });
+        
+        // Process audio data
+        const audioContext = new AudioContext({ sampleRate: 16000 });
+        const source = audioContext.createMediaStreamSource(stream);
+        const processor = audioContext.createScriptProcessor(4096, 1, 1);
+        
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+        
+        processor.onaudioprocess = (e) => {
+          if (!isRecording) return;
+          
+          // Convert audio to Int16
+          const inputData = e.inputBuffer.getChannelData(0);
+          const int16Data = convertFloat32ToInt16(inputData);
+          
+          // Send to server via WebSocket
+          if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+            ws.current.send(int16Data);
+          }
+        };
+        
+        // Handle transcriptions from server
+        ws.current.onmessage = (e) => {
+          if (e.data.startsWith('ERROR:')) {
+            setStatus(e.data);
+          } else {
+            setTranscript(prev => prev + ' ' + e.data);
+          }
+        };
+        
+        ws.current.onerror = (e) => {
+          setStatus('WebSocket error');
+          console.error('WebSocket error:', e);
+        };
+        
+        ws.current.onclose = () => {
+          setStatus('Disconnected');
+          setIsRecording(false);
+        };
+      };
+      
+    } catch (error) {
+      setStatus(`Error: ${error.message}`);
+      console.error('Error starting recording:', error);
+    }
+  };
 
-        return new Blob([view], { type: "audio/wav" });
-    };
+  const stopRecording = () => {
+    if (mediaRecorder.current && mediaRecorder.current.state === 'recording') {
+      mediaRecorder.current.stop();
+    }
+    
+    if (ws.current) {
+      ws.current.close();
+    }
+    
+    setIsRecording(false);
+    setStatus('Recording stopped');
+  };
 
-    return (
-        <div className="p-4 border rounded bg-gray-100">
-            <h2 className="font-bold">🎤 Mic Streamer</h2>
-            <button
-                className="px-4 py-2 mt-2 bg-blue-600 text-white rounded"
-                onClick={startStopStreaming}
-            >
-                {recording ? "Stop Recording" : "Start Recording"}
-            </button>
-            {recording && <p>Streaming audio to backend...</p>}
+  const convertFloat32ToInt16 = (buffer) => {
+    const l = buffer.length;
+    const buf = new Int16Array(l);
+    for (let i = 0; i < l; i++) {
+      buf[i] = Math.min(1, buffer[i]) * 0x7FFF;
+    }
+    return buf.buffer;
+  };
+
+  return (
+    <div className="App">
+      <header className="App-header">
+        <h1>Real-Time Transcription</h1>
+        
+        <div className="controls">
+          <button 
+            onClick={isRecording ? stopRecording : startRecording}
+            className={isRecording ? 'stop-btn' : 'start-btn'}
+          >
+            {isRecording ? 'Stop Recording' : 'Start Recording'}
+          </button>
         </div>
-    );
-};
+        
+        <div className="status">
+          Status: {status}
+        </div>
+        
+        <div className="transcript">
+          <h2>Transcript:</h2>
+          <p>{transcript || 'Start recording to see transcript here...'}</p>
+        </div>
+      </header>
+    </div>
+  );
+}
 
-export default MicStreamer;
+export default MicStream;
